@@ -1,0 +1,64 @@
+
+name: Build NEXORA APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git zip unzip \
+            openjdk-17-jdk \
+            python3-pip \
+            autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev \
+            libncursesw5-dev libtinfo6 \
+            cmake libffi-dev libssl-dev
+
+      - name: Install Python tools
+        run: |
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user buildozer Cython==0.29.36
+
+      - name: Extract project ZIP
+        run: |
+          ZIP_FILE=$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "Project ZIP file was not found in repository root."
+            exit 1
+          fi
+          mkdir -p source
+          unzip -q "$ZIP_FILE" -d source
+          SPEC=$(find source -type f -name buildozer.spec -print -quit)
+          if [ -z "$SPEC" ]; then
+            echo "buildozer.spec was not found inside the ZIP."
+            exit 1
+          fi
+          echo "PROJECT_DIR=$(dirname "$SPEC")" >> "$GITHUB_ENV"
+
+      - name: Build Android APK
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd "$PROJECT_DIR"
+          buildozer -v android debug
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NEXORA-APK
+          path: source/**/bin/*.apk
+          if-no-files-found: error
+          retention-days: 7
