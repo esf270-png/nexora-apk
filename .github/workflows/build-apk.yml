@@ -66,19 +66,15 @@ jobs:
         shell: bash
         run: |
           set -e
+          unset VIRTUAL_ENV
 
-          python3 -m venv "$RUNNER_TEMP/build-venv"
-
-          "$RUNNER_TEMP/build-venv/bin/python" -m pip install \
-            --upgrade pip setuptools wheel
-
-          "$RUNNER_TEMP/build-venv/bin/python" -m pip install \
+          python3 -m pip install --user --upgrade \
             buildozer \
             Cython==0.29.36
 
-          "$RUNNER_TEMP/build-venv/bin/buildozer" --version
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-          echo "$RUNNER_TEMP/build-venv/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/buildozer" --version
 
       - name: Locate Android project
         shell: bash
@@ -102,19 +98,15 @@ jobs:
 
             if [ -z "$ZIP_FILE" ]; then
               echo "ERROR: No buildozer.spec or project ZIP found."
-              find "$GITHUB_WORKSPACE" \
-                -maxdepth 4 -type f -print
+              find "$GITHUB_WORKSPACE" -maxdepth 4 -type f -print
               exit 1
             fi
 
             mkdir -p "$RUNNER_TEMP/nexora-source"
-            unzip -q "$ZIP_FILE" \
-              -d "$RUNNER_TEMP/nexora-source"
+            unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/nexora-source"
 
             SPEC="$(find "$RUNNER_TEMP/nexora-source" \
-              -type f \
-              -name buildozer.spec \
-              -print -quit)"
+              -type f -name buildozer.spec -print -quit)"
 
             if [ -z "$SPEC" ]; then
               echo "ERROR: ZIP does not contain buildozer.spec."
@@ -133,10 +125,7 @@ jobs:
           set -e
           cd "$PROJECT_DIR"
 
-          if [ ! -f buildozer.spec ]; then
-            echo "ERROR: buildozer.spec not found."
-            exit 1
-          fi
+          test -f buildozer.spec
 
           if ! grep -q '^\[app\]' buildozer.spec; then
             echo "ERROR: Missing [app] section."
@@ -153,17 +142,24 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          unset VIRTUAL_ENV
 
-          export PATH="$JAVA_HOME/bin:$RUNNER_TEMP/build-venv/bin:/usr/bin:/bin"
+          export PATH="$JAVA_HOME/bin:$HOME/.local/bin:/usr/bin:/bin"
 
-          echo "JAVA_HOME=$JAVA_HOME"
+          echo "Java:"
           java -version
           javac -version
+
+          echo "Python:"
           python3 --version
+
+          echo "Buildozer:"
+          command -v buildozer
+          buildozer --version
 
           cd "$PROJECT_DIR"
 
-          "$RUNNER_TEMP/build-venv/bin/buildozer" -v android debug \
+          buildozer -v android debug \
             2>&1 | tee "$RUNNER_TEMP/buildozer.log"
 
       - name: Show build diagnostics
@@ -173,8 +169,7 @@ jobs:
           echo "APK files:"
 
           if [ -n "${PROJECT_DIR:-}" ] && [ -d "${PROJECT_DIR:-}" ]; then
-            find "$PROJECT_DIR" \
-              -type f -name '*.apk' -print || true
+            find "$PROJECT_DIR" -type f -name '*.apk' -print || true
           fi
 
           echo "Last 200 lines of build log:"
