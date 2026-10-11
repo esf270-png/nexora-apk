@@ -1,4 +1,4 @@
-
+```yaml
 name: Build NEXORA APK
 
 on:
@@ -27,18 +27,20 @@ jobs:
           java-version: "17"
           architecture: x64
 
-      - name: Verify Java
+      - name: Verify Java and Python
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
           echo "JAVA_HOME=$JAVA_HOME"
           java -version
           javac -version
+          python3 --version
+          python3 -m pip --version
 
       - name: Install system dependencies
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           sudo apt-get update
 
@@ -62,45 +64,61 @@ jobs:
             python3-pip \
             python3-venv
 
-      - name: Install Buildozer outside virtualenv
+      - name: Install Buildozer with system Python
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          python3 --version
-          python3 -m pip --version
-
-          python3 -m pip install --user \
+          # Install outside any virtual environment.
+          sudo python3 -m pip install \
             buildozer \
             Cython==0.29.36
 
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # Confirm that the system installation is being used.
+          echo "Buildozer executable:"
+          command -v /usr/local/bin/buildozer
+
+          echo "Buildozer version:"
+          /usr/local/bin/buildozer --version
+
+          echo "Buildozer Python interpreter:"
+          head -n 1 /usr/local/bin/buildozer
 
       - name: Locate Android project
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          SPEC="$(find . -type f -name buildozer.spec \
-            -not -path './.git/*' -print -quit)"
+          SPEC="$(find "$GITHUB_WORKSPACE" \
+            -type f \
+            -name buildozer.spec \
+            -not -path '*/.git/*' \
+            -print -quit)"
 
           if [ -n "$SPEC" ]; then
             PROJECT_DIR="$(dirname "$SPEC")"
           else
-            ZIP_FILE="$(find . -maxdepth 2 -type f \
-              -iname '*.zip' -print -quit)"
+            ZIP_FILE="$(find "$GITHUB_WORKSPACE" \
+              -maxdepth 3 \
+              -type f \
+              -iname '*.zip' \
+              -print -quit)"
 
             if [ -z "$ZIP_FILE" ]; then
               echo "ERROR: No buildozer.spec or project ZIP found."
-              find . -maxdepth 3 -type f -print
+              find "$GITHUB_WORKSPACE" \
+                -maxdepth 4 -type f -print
               exit 1
             fi
 
             mkdir -p "$RUNNER_TEMP/nexora-source"
-            unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/nexora-source"
+            unzip -q "$ZIP_FILE" \
+              -d "$RUNNER_TEMP/nexora-source"
 
             SPEC="$(find "$RUNNER_TEMP/nexora-source" \
-              -type f -name buildozer.spec -print -quit)"
+              -type f \
+              -name buildozer.spec \
+              -print -quit)"
 
             if [ -z "$SPEC" ]; then
               echo "ERROR: ZIP does not contain buildozer.spec."
@@ -111,44 +129,47 @@ jobs:
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Project directory: $PROJECT_DIR"
+          echo "Found project: $PROJECT_DIR"
 
-      - name: Validate project
+      - name: Validate Android project
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           cd "$PROJECT_DIR"
 
-          if [ ! -f buildozer.spec ]; then
-            echo "ERROR: buildozer.spec not found."
-            exit 1
-          fi
+          test -f buildozer.spec
 
           echo "Project files:"
           ls -la
 
+          echo "Checking Python syntax..."
           python3 -m compileall -q .
 
           if ! grep -q '^\[app\]' buildozer.spec; then
-            echo "ERROR: Missing [app] section."
+            echo "ERROR: Missing [app] section in buildozer.spec."
             exit 1
           fi
+
+          echo "Project validation passed."
 
       - name: Build Android APK
         shell: bash
         run: |
-          set -euo pipefail
+          set -o pipefail
 
-          export PATH="$JAVA_HOME/bin:$HOME/.local/bin:$PATH"
+          # Avoid accidentally invoking an old Buildozer from ~/.local/bin.
+          export PATH="$JAVA_HOME/bin:/usr/local/bin:/usr/bin:/bin"
 
           echo "JAVA_HOME=$JAVA_HOME"
           echo "Python:"
           python3 --version
 
-          echo "Buildozer:"
+          echo "Buildozer path:"
           command -v buildozer
-          buildozer --version
+
+          echo "Buildozer version:"
+          /usr/local/bin/buildozer --version
 
           echo "Java:"
           java -version
@@ -156,26 +177,44 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          buildozer -v android debug
+          # Save the complete output, including errors.
+          /usr/local/bin/buildozer -v android debug \
+            2>&1 | tee "$RUNNER_TEMP/buildozer.log"
 
       - name: Show build diagnostics
         if: always()
         shell: bash
         run: |
-          echo "APK files:"
-          find . "$RUNNER_TEMP" \
-            -type f -name '*.apk' -print 2>/dev/null || true
+          echo "Searching for generated APK files..."
 
-          echo "Buildozer files:"
-          find "$HOME/.buildozer" \
-            -type f -name '*.log' -print 2>/dev/null || true
+          if [ -n "${PROJECT_DIR:-}" ] && [ -d "${PROJECT_DIR:-}" ]; then
+            find "$PROJECT_DIR" \
+              -type f -name '*.apk' -print || true
+          fi
+
+          echo "Build log:"
+          if [ -f "$RUNNER_TEMP/buildozer.log" ]; then
+            echo "Last 200 lines of the Buildozer log:"
+            tail -n 200 "$RUNNER_TEMP/buildozer.log"
+          else
+            echo "No Buildozer log was generated."
+          fi
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NEXORA-Build-Log
+          path: ${{ runner.temp }}/buildozer.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: NEXORA-APK
-          path: |
-            **/bin/*.apk
+          path: ${{ env.PROJECT_DIR }}/bin/*.apk
           if-no-files-found: error
           retention-days: 7
+```
