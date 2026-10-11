@@ -66,13 +66,19 @@ jobs:
         shell: bash
         run: |
           set -e
-          sudo python3 -m pip install \
-            --break-system-packages \
+
+          python3 -m venv "$RUNNER_TEMP/build-venv"
+
+          "$RUNNER_TEMP/build-venv/bin/python" -m pip install \
+            --upgrade pip setuptools wheel
+
+          "$RUNNER_TEMP/build-venv/bin/python" -m pip install \
             buildozer \
             Cython==0.29.36
 
-          echo "Buildozer version:"
-          /usr/local/bin/buildozer --version
+          "$RUNNER_TEMP/build-venv/bin/buildozer" --version
+
+          echo "$RUNNER_TEMP/build-venv/bin" >> "$GITHUB_PATH"
 
       - name: Locate Android project
         shell: bash
@@ -127,7 +133,10 @@ jobs:
           set -e
           cd "$PROJECT_DIR"
 
-          test -f buildozer.spec
+          if [ ! -f buildozer.spec ]; then
+            echo "ERROR: buildozer.spec not found."
+            exit 1
+          fi
 
           if ! grep -q '^\[app\]' buildozer.spec; then
             echo "ERROR: Missing [app] section."
@@ -145,17 +154,16 @@ jobs:
         run: |
           set -o pipefail
 
-          export PATH="$JAVA_HOME/bin:/usr/local/bin:/usr/bin:/bin"
+          export PATH="$JAVA_HOME/bin:$RUNNER_TEMP/build-venv/bin:/usr/bin:/bin"
 
           echo "JAVA_HOME=$JAVA_HOME"
           java -version
           javac -version
           python3 --version
-          /usr/local/bin/buildozer --version
 
           cd "$PROJECT_DIR"
 
-          /usr/local/bin/buildozer -v android debug \
+          "$RUNNER_TEMP/build-venv/bin/buildozer" -v android debug \
             2>&1 | tee "$RUNNER_TEMP/buildozer.log"
 
       - name: Show build diagnostics
@@ -163,12 +171,14 @@ jobs:
         shell: bash
         run: |
           echo "APK files:"
+
           if [ -n "${PROJECT_DIR:-}" ] && [ -d "${PROJECT_DIR:-}" ]; then
             find "$PROJECT_DIR" \
               -type f -name '*.apk' -print || true
           fi
 
           echo "Last 200 lines of build log:"
+
           if [ -f "$RUNNER_TEMP/buildozer.log" ]; then
             tail -n 200 "$RUNNER_TEMP/buildozer.log"
           else
