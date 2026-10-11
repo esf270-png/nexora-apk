@@ -25,6 +25,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          architecture: x64
 
       - name: Verify Java
         shell: bash
@@ -38,7 +39,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           sudo apt-get update
+
           sudo apt-get install -y \
             build-essential \
             git \
@@ -56,18 +59,22 @@ jobs:
             libssl-dev \
             libltdl-dev \
             python3-dev \
+            python3-pip \
             python3-venv
 
-      - name: Install Buildozer
+      - name: Install Buildozer outside virtualenv
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 -m venv "$RUNNER_TEMP/build-venv"
-          "$RUNNER_TEMP/build-venv/bin/python" -m pip install --upgrade pip setuptools wheel
-          "$RUNNER_TEMP/build-venv/bin/python" -m pip install buildozer Cython==0.29.36
+          python3 --version
+          python3 -m pip --version
 
-          echo "$RUNNER_TEMP/build-venv/bin" >> "$GITHUB_PATH"
+          python3 -m pip install --user \
+            buildozer \
+            Cython==0.29.36
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Locate Android project
         shell: bash
@@ -80,11 +87,11 @@ jobs:
           if [ -n "$SPEC" ]; then
             PROJECT_DIR="$(dirname "$SPEC")"
           else
-            ZIP_FILE="$(find . -maxdepth 2 -type f -iname '*.zip' -print -quit)"
+            ZIP_FILE="$(find . -maxdepth 2 -type f \
+              -iname '*.zip' -print -quit)"
 
             if [ -z "$ZIP_FILE" ]; then
-              echo "ERROR: buildozer.spec or project ZIP not found."
-              echo "Repository contents:"
+              echo "ERROR: No buildozer.spec or project ZIP found."
               find . -maxdepth 3 -type f -print
               exit 1
             fi
@@ -96,7 +103,7 @@ jobs:
               -type f -name buildozer.spec -print -quit)"
 
             if [ -z "$SPEC" ]; then
-              echo "ERROR: buildozer.spec not found inside ZIP."
+              echo "ERROR: ZIP does not contain buildozer.spec."
               exit 1
             fi
 
@@ -104,15 +111,19 @@ jobs:
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Found project: $PROJECT_DIR"
+          echo "Project directory: $PROJECT_DIR"
 
       - name: Validate project
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$PROJECT_DIR"
 
-          test -f buildozer.spec
+          if [ ! -f buildozer.spec ]; then
+            echo "ERROR: buildozer.spec not found."
+            exit 1
+          fi
 
           echo "Project files:"
           ls -la
@@ -120,7 +131,7 @@ jobs:
           python3 -m compileall -q .
 
           if ! grep -q '^\[app\]' buildozer.spec; then
-            echo "ERROR: Missing [app] section in buildozer.spec."
+            echo "ERROR: Missing [app] section."
             exit 1
           fi
 
@@ -129,15 +140,35 @@ jobs:
         run: |
           set -euo pipefail
 
-          export PATH="$JAVA_HOME/bin:$RUNNER_TEMP/build-venv/bin:$HOME/.local/bin:$PATH"
+          export PATH="$JAVA_HOME/bin:$HOME/.local/bin:$PATH"
 
           echo "JAVA_HOME=$JAVA_HOME"
+          echo "Python:"
+          python3 --version
+
+          echo "Buildozer:"
+          command -v buildozer
+          buildozer --version
+
+          echo "Java:"
           java -version
           javac -version
 
           cd "$PROJECT_DIR"
 
           buildozer -v android debug
+
+      - name: Show build diagnostics
+        if: always()
+        shell: bash
+        run: |
+          echo "APK files:"
+          find . "$RUNNER_TEMP" \
+            -type f -name '*.apk' -print 2>/dev/null || true
+
+          echo "Buildozer files:"
+          find "$HOME/.buildozer" \
+            -type f -name '*.log' -print 2>/dev/null || true
 
       - name: Upload APK
         if: success()
