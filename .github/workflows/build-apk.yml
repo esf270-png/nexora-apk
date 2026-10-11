@@ -12,7 +12,14 @@ permissions:
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    env:
+      JAVA_HOME: /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.20-1/x64
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      BUILDOZER_WARN_ON_ROOT: "0"
 
     steps:
       - name: Checkout repository
@@ -22,16 +29,24 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
           architecture: x64
+
+      - name: Verify Java
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+          javac -version
+          test -x "$JAVA_HOME/bin/java"
+          test -x "$JAVA_HOME/bin/javac"
 
       - name: Install system dependencies
         shell: bash
         run: |
           set -euo pipefail
-
           sudo apt-get update
-
           sudo apt-get install -y \
             build-essential \
             git \
@@ -44,150 +59,121 @@ jobs:
             zlib1g-dev \
             libncurses5-dev \
             libncursesw5-dev \
-            libtinfo6 \
             cmake \
             libffi-dev \
             libssl-dev \
             libltdl-dev \
+            python3-dev \
             python3-pip \
             python3-venv
 
-      - name: Verify Java
+      - name: Install Buildozer
         shell: bash
         run: |
           set -euo pipefail
+          python3 -m pip install --user --upgrade \
+            --break-system-packages \
+            pip setuptools wheel
 
-          echo "JAVA_HOME=$JAVA_HOME"
-          java -version
-          javac -version
-
-          test -x "$JAVA_HOME/bin/java"
-          test -x "$JAVA_HOME/bin/javac"
-
-      - name: Install Python build tools
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 -m pip install --user --upgrade pip
           python3 -m pip install --user \
+            --break-system-packages \
             buildozer \
             Cython==0.29.36
 
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Extract project ZIP
+      - name: Locate Android project
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)"
+          echo "Repository files:"
+          find . -maxdepth 3 -type f \
+            \( -name 'buildozer.spec' -o -name 'rirex.py' -o -name 'main.py' -o -iname '*.zip' \) \
+            -print
 
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No project ZIP found in repository root."
-            exit 1
+          SPEC="$(find . -type f -name buildozer.spec \
+            -not -path './.git/*' -print -quit)"
+
+          if [ -n "$SPEC" ]; then
+            PROJECT_DIR="$(dirname "$SPEC")"
+          else
+            ZIP_FILE="$(find . -maxdepth 2 -type f -iname '*.zip' -print -quit)"
+
+            if [ -z "$ZIP_FILE" ]; then
+              echo "ERROR: buildozer.spec and project ZIP were not found."
+              echo "Add the complete Android project to the repository."
+              exit 1
+            fi
+
+            mkdir -p "$RUNNER_TEMP/nexora_source"
+            unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/nexora_source"
+
+            SPEC="$(find "$RUNNER_TEMP/nexora_source" \
+              -type f -name buildozer.spec -print -quit)"
+
+            if [ -z "$SPEC" ]; then
+              echo "ERROR: ZIP does not contain buildozer.spec."
+              exit 1
+            fi
+
+            PROJECT_DIR="$(dirname "$SPEC")"
           fi
-
-          echo "Using project archive: $ZIP_FILE"
-
-          mkdir -p source
-          unzip -q "$ZIP_FILE" -d source
-
-          SPEC="$(find source -type f -name buildozer.spec -print -quit)"
-
-          if [ -z "$SPEC" ]; then
-            echo "ERROR: buildozer.spec was not found inside the ZIP."
-            echo "Check that the ZIP contains the complete Android project."
-            exit 1
-          fi
-
-          PROJECT_DIR="$(dirname "$SPEC")"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Project directory: $PROJECT_DIR"
 
-      - name: Configure Android NDK
+      - name: Validate project
         shell: bash
         run: |
           set -euo pipefail
+          cd "$PROJECT_DIR"
 
-          python3 - "$PROJECT_DIR/buildozer.spec" <<'PY'
-          import sys
-          from pathlib import Path
+          test -f buildozer.spec
 
-          path = Path(sys.argv[1])
-          lines = path.read_text(encoding="utf-8").splitlines()
+          echo "Project files:"
+          ls -la
 
-          result = []
-          in_app = False
-          found = False
+          echo "Checking Python syntax..."
+          python3 -m compileall -q .
 
-          for line in lines:
-              stripped = line.strip()
+          echo "Buildozer configuration:"
+          grep -E '^(title|package.name|package.domain|source.dir|source.include_exts|requirements|orientation|android.api|android.minapi|android.ndk)' \
+            buildozer.spec || true
 
-              if stripped.startswith("[") and stripped.endswith("]"):
-                  in_app = stripped == "[app]"
-
-              if in_app and stripped.startswith("android.ndk"):
-                  key = stripped.split("=", 1)[0].strip()
-                  if key == "android.ndk":
-                      result.append("android.ndk = 28c")
-                      found = True
-                      continue
-
-              result.append(line)
-
-              if in_app and stripped == "[app]":
-                  pass
-
-          if not found:
-              result = []
-              inserted = False
-              in_app = False
-
-              for line in lines:
-                  stripped = line.strip()
-
-                  if stripped.startswith("[") and stripped.endswith("]"):
-                      if in_app and not inserted:
-                          result.append("android.ndk = 28c")
-                          inserted = True
-                      in_app = stripped == "[app]"
-
-                  result.append(line)
-
-              if in_app and not inserted:
-                  result.append("android.ndk = 28c")
-                  inserted = True
-
-              if not inserted:
-                  raise SystemExit("ERROR: [app] section not found in buildozer.spec")
-
-          path.write_text("\n".join(result) + "\n", encoding="utf-8")
-          print("Configured Android NDK 28c in the [app] section.")
-          PY
-
-      - name: Check Python source
+      - name: Prepare Android build
         shell: bash
         run: |
           set -euo pipefail
-
           export PATH="$JAVA_HOME/bin:$HOME/.local/bin:$PATH"
-
-          echo "JAVA_HOME=$JAVA_HOME"
-          java -version
-          javac -version
 
           cd "$PROJECT_DIR"
 
-          echo "Checking Python files in: $PWD"
-          python3 -m compileall -q .
+          if ! grep -q '^\[app\]' buildozer.spec; then
+            echo "ERROR: [app] section is missing."
+            exit 1
+          fi
+
+          if ! grep -q '^source.include_exts' buildozer.spec; then
+            echo "WARNING: source.include_exts is not configured."
+          fi
+
+          if ! grep -q '^requirements' buildozer.spec; then
+            echo "WARNING: requirements is not configured."
+          fi
+
+          echo "Build environment:"
+          python3 --version
+          buildozer --version
+          java -version
+          echo "ANDROID_HOME=${ANDROID_HOME:-not set}"
+          echo "ANDROIDSDK=${ANDROIDSDK:-not set}"
+          echo "ANDROIDNDK=${ANDROIDNDK:-not set}"
 
       - name: Build Android APK
         shell: bash
         run: |
           set -euo pipefail
-
           export PATH="$JAVA_HOME/bin:$HOME/.local/bin:$PATH"
 
           echo "JAVA_HOME=$JAVA_HOME"
@@ -198,11 +184,26 @@ jobs:
 
           buildozer -v android debug
 
+      - name: Show build diagnostics
+        if: always()
+        shell: bash
+        run: |
+          echo "Searching for APK files..."
+          find . "$RUNNER_TEMP" \
+            -type f -name '*.apk' -print 2>/dev/null || true
+
+          echo "Searching for Buildozer logs..."
+          find . "$HOME/.buildozer" \
+            -type f \( -name '*.log' -o -name 'buildozer.spec' \) \
+            -print 2>/dev/null | head -100 || true
+
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: NEXORA-APK
-          path: source/**/bin/*.apk
+          path: |
+            **/bin/*.apk
+            /home/runner/.buildozer/**/*.apk
           if-no-files-found: error
           retention-days: 7
