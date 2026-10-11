@@ -1,7 +1,7 @@
-```yaml
+
 name: Build NEXORA APK
 
-on:
+"on":
   workflow_dispatch:
   push:
     branches:
@@ -27,7 +27,7 @@ jobs:
           java-version: "17"
           architecture: x64
 
-      - name: Verify Java and Python
+      - name: Verify environment
         shell: bash
         run: |
           set -e
@@ -41,9 +41,7 @@ jobs:
         shell: bash
         run: |
           set -e
-
           sudo apt-get update
-
           sudo apt-get install -y \
             build-essential \
             git \
@@ -64,25 +62,17 @@ jobs:
             python3-pip \
             python3-venv
 
-      - name: Install Buildozer with system Python
+      - name: Install Buildozer
         shell: bash
         run: |
           set -e
-
-          # Install outside any virtual environment.
           sudo python3 -m pip install \
+            --break-system-packages \
             buildozer \
             Cython==0.29.36
 
-          # Confirm that the system installation is being used.
-          echo "Buildozer executable:"
-          command -v /usr/local/bin/buildozer
-
           echo "Buildozer version:"
           /usr/local/bin/buildozer --version
-
-          echo "Buildozer Python interpreter:"
-          head -n 1 /usr/local/bin/buildozer
 
       - name: Locate Android project
         shell: bash
@@ -129,16 +119,20 @@ jobs:
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Found project: $PROJECT_DIR"
+          echo "Project directory: $PROJECT_DIR"
 
-      - name: Validate Android project
+      - name: Validate project
         shell: bash
         run: |
           set -e
-
           cd "$PROJECT_DIR"
 
           test -f buildozer.spec
+
+          if ! grep -q '^\[app\]' buildozer.spec; then
+            echo "ERROR: Missing [app] section."
+            exit 1
+          fi
 
           echo "Project files:"
           ls -la
@@ -146,38 +140,21 @@ jobs:
           echo "Checking Python syntax..."
           python3 -m compileall -q .
 
-          if ! grep -q '^\[app\]' buildozer.spec; then
-            echo "ERROR: Missing [app] section in buildozer.spec."
-            exit 1
-          fi
-
-          echo "Project validation passed."
-
       - name: Build Android APK
         shell: bash
         run: |
           set -o pipefail
 
-          # Avoid accidentally invoking an old Buildozer from ~/.local/bin.
           export PATH="$JAVA_HOME/bin:/usr/local/bin:/usr/bin:/bin"
 
           echo "JAVA_HOME=$JAVA_HOME"
-          echo "Python:"
-          python3 --version
-
-          echo "Buildozer path:"
-          command -v buildozer
-
-          echo "Buildozer version:"
-          /usr/local/bin/buildozer --version
-
-          echo "Java:"
           java -version
           javac -version
+          python3 --version
+          /usr/local/bin/buildozer --version
 
           cd "$PROJECT_DIR"
 
-          # Save the complete output, including errors.
           /usr/local/bin/buildozer -v android debug \
             2>&1 | tee "$RUNNER_TEMP/buildozer.log"
 
@@ -185,19 +162,17 @@ jobs:
         if: always()
         shell: bash
         run: |
-          echo "Searching for generated APK files..."
-
+          echo "APK files:"
           if [ -n "${PROJECT_DIR:-}" ] && [ -d "${PROJECT_DIR:-}" ]; then
             find "$PROJECT_DIR" \
               -type f -name '*.apk' -print || true
           fi
 
-          echo "Build log:"
+          echo "Last 200 lines of build log:"
           if [ -f "$RUNNER_TEMP/buildozer.log" ]; then
-            echo "Last 200 lines of the Buildozer log:"
             tail -n 200 "$RUNNER_TEMP/buildozer.log"
           else
-            echo "No Buildozer log was generated."
+            echo "Build log not found."
           fi
 
       - name: Upload build log
@@ -217,4 +192,3 @@ jobs:
           path: ${{ env.PROJECT_DIR }}/bin/*.apk
           if-no-files-found: error
           retention-days: 7
-```
