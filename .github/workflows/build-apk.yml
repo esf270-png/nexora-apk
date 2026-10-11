@@ -13,7 +13,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -26,77 +25,163 @@ jobs:
           java-version: '17'
           architecture: x64
 
-      - name: Verify Java
+      - name: Install system dependencies
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            zip \
+            unzip \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config \
+            zlib1g-dev \
+            libncurses5-dev \
+            libncursesw5-dev \
+            libtinfo6 \
+            cmake \
+            libffi-dev \
+            libssl-dev \
+            libltdl-dev \
+            python3-pip \
+            python3-venv
+
+      - name: Verify Java
+        shell: bash
+        run: |
+          set -euo pipefail
+
           echo "JAVA_HOME=$JAVA_HOME"
-          echo "$JAVA_HOME/bin" >> "$GITHUB_PATH"
           java -version
           javac -version
+
+          test -x "$JAVA_HOME/bin/java"
           test -x "$JAVA_HOME/bin/javac"
 
-      - name: Install system dependencies
+      - name: Install Python build tools
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git zip unzip \
-            autoconf automake libtool pkg-config \
-            zlib1g-dev libncurses5-dev \
-            libncursesw5-dev libtinfo6 \
-            cmake libffi-dev libssl-dev \
-            libltdl-dev
+          set -euo pipefail
 
-      - name: Install Python tools
-        run: |
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user \
             buildozer \
             Cython==0.29.36
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Extract project ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP_FILE=$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)
+          ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)"
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Project ZIP not found in repository root."
+            echo "ERROR: No project ZIP found in repository root."
             exit 1
           fi
+
+          echo "Using project archive: $ZIP_FILE"
 
           mkdir -p source
           unzip -q "$ZIP_FILE" -d source
 
-          SPEC=$(find source -type f -name buildozer.spec -print -quit)
+          SPEC="$(find source -type f -name buildozer.spec -print -quit)"
 
           if [ -z "$SPEC" ]; then
-            echo "ERROR: buildozer.spec not found inside ZIP."
-            find source -maxdepth 3 -type f
+            echo "ERROR: buildozer.spec was not found inside the ZIP."
+            echo "Check that the ZIP contains the complete Android project."
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$SPEC")
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          PROJECT_DIR="$(dirname "$SPEC")"
 
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Project directory: $PROJECT_DIR"
-          ls -la "$PROJECT_DIR"
 
       - name: Configure Android NDK
         shell: bash
         run: |
           set -euo pipefail
 
-          SPEC="$PROJECT_DIR/buildozer.spec"
+          python3 - "$PROJECT_DIR/buildozer.spec" <<'PY'
+          import sys
+          from pathlib import Path
 
-          if grep -q '^android.ndk *=' "$SPEC"; then
-            sed -i 's/^android.ndk *=.*/android.ndk = 28c/' "$SPEC"
-          else
-            echo 'android.ndk = 28c' >> "$SPEC"
-          fi
+          path = Path(sys.argv[1])
+          lines = path.read_text(encoding="utf-8").splitlines()
 
-          echo "Configured NDK:"
-          grep '^android.ndk *=' "$SPEC"
+          result = []
+          in_app = False
+          found = False
+
+          for line in lines:
+              stripped = line.strip()
+
+              if stripped.startswith("[") and stripped.endswith("]"):
+                  in_app = stripped == "[app]"
+
+              if in_app and stripped.startswith("android.ndk"):
+                  key = stripped.split("=", 1)[0].strip()
+                  if key == "android.ndk":
+                      result.append("android.ndk = 28c")
+                      found = True
+                      continue
+
+              result.append(line)
+
+              if in_app and stripped == "[app]":
+                  pass
+
+          if not found:
+              result = []
+              inserted = False
+              in_app = False
+
+              for line in lines:
+                  stripped = line.strip()
+
+                  if stripped.startswith("[") and stripped.endswith("]"):
+                      if in_app and not inserted:
+                          result.append("android.ndk = 28c")
+                          inserted = True
+                      in_app = stripped == "[app]"
+
+                  result.append(line)
+
+              if in_app and not inserted:
+                  result.append("android.ndk = 28c")
+                  inserted = True
+
+              if not inserted:
+                  raise SystemExit("ERROR: [app] section not found in buildozer.spec")
+
+          path.write_text("\n".join(result) + "\n", encoding="utf-8")
+          print("Configured Android NDK 28c in the [app] section.")
+          PY
+
+      - name: Check Python source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PATH="$JAVA_HOME/bin:$HOME/.local/bin:$PATH"
+
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+          javac -version
+
+          cd "$PROJECT_DIR"
+
+          echo "Checking Python files in: $PWD"
+          python3 -m compileall -q .
 
       - name: Build Android APK
         shell: bash
@@ -111,7 +196,6 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          python3 -m compileall -q .
           buildozer -v android debug
 
       - name: Upload APK
